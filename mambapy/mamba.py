@@ -108,6 +108,12 @@ class ResidualBlock(nn.Module):
 
         # output : (B, L, D)
 
+        print("---"*10)
+        print("In ResidualBlock")
+        print("x.shape:", x.shape)
+        print("self.norm(x).shape:", self.norm(x).shape)
+        print("---"*10)
+        
         output = self.mixer(self.norm(x)) + x
         return output
     
@@ -207,7 +213,9 @@ class MambaBlock(nn.Module):
         
         # y : (B, L, D)
 
-
+        print("---"*10)
+        print("In MambaBlock")
+        
         _, L, _ = x.shape
 
         xz = self.in_proj(x) # (B, L, 2*ED)
@@ -215,21 +223,25 @@ class MambaBlock(nn.Module):
 
         # x branch
         x = x.transpose(1, 2) # (B, ED, L)
+        print(x.shape)
         x = self.conv1d(x)[:, :, :L] # depthwise convolution over time, with a short filter
+        print(x.shape)
         x = x.transpose(1, 2) # (B, L, ED)
 
-        x = F.silu(x)
-        y = self.ssm(x, z)
+        x = F.silu(x) # (B, L, ED)
+        y = self.ssm(x, z) # (B, L, ED)
 
         if self.config.use_cuda:
             output = self.out_proj(y) # (B, L, D)
             return output # the rest of the operations are done in the ssm function (fused with the CUDA pscan)
 
         # z branch
-        z = F.silu(z)
+        z = F.silu(z) # (B, L, ED)
 
         output = y * z
         output = self.out_proj(output) # (B, L, D)
+
+        print("---"*10)
 
         return output
     
@@ -242,31 +254,47 @@ class MambaBlock(nn.Module):
         D = self.D.float()
 
         deltaBC = self.x_proj(x) # (B, L, dt_rank+2*N)
+        
+        print("B, L, ED, N, dt_rank:", \
+            x.shape[0], x.shape[1], x.shape[2], A.shape[-1], deltaBC.shape[-1] - 2 * A.shape[-1])
+
+        # 這裡很重要
+        # deltaBC, B, C is depend of the input x
         delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state], dim=-1) # (B, L, dt_rank), (B, L, N), (B, L, N)
         delta, B, C = self._apply_layernorms(delta, B, C)
         delta = self.dt_proj.weight @ delta.transpose(1, 2) # (ED, dt_rank) @ (B, L, dt_rank) -> (B, ED, L)
+        # print("delta.shape, B.shape, C.shape:", delta.shape, B.shape, C.shape)
         # here we just apply the matrix mul operation of delta = softplus(dt_proj(delta))
         # the rest will be applied later (fused if using cuda)
         
         # choose which selective_scan function to use, according to config
         if self.config.use_cuda:
             # these are unfortunately needed for the selective_scan_cuda function
+            # print("x.shape, delta.shape, B.shape, C.shape, z.shape:", x.shape, delta.shape, B.shape, C.shape, z.shape)
             x = x.transpose(1, 2)
             B = B.transpose(1, 2)
             C = C.transpose(1, 2)
             z = z.transpose(1, 2)
+            print("x.shape, delta.shape, B.shape, C.shape, z.shape:", x.shape, delta.shape, B.shape, C.shape, z.shape)
 
             # "softplus" + "bias" + "y * silu(z)" operations are fused
             y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=True, delta_bias=self.dt_proj.bias.float())
             y = y.transpose(1, 2) # (B, L, ED)
+            print("y.shape:", y.shape, "(B,L,ED)")
         
         else:
             delta = delta.transpose(1, 2)
             delta = F.softplus(delta + self.dt_proj.bias)
 
+            print("x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape:")
+            print(x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape)
+            
+            # use parallel scan mode or sequential mode when training
             if self.config.pscan:
+                print("self.selective_scan")
                 y = self.selective_scan(x, delta, A, B, C, D)
             else:
+                print("self.selective_scan_seq")
                 y = self.selective_scan_seq(x, delta, A, B, C, D)
 
         return y
@@ -286,11 +314,11 @@ class MambaBlock(nn.Module):
 
         BX = deltaB * (x.unsqueeze(-1)) # (B, L, ED, N)
         
-        hs = pscan(deltaA, BX)
+        hs = pscan(deltaA, BX) # (B, L, ED, N)
 
         y = (hs @ C.unsqueeze(-1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
-        y = y + D * x
+        y = y + D * x # (B, L, ED)
 
         return y
     
@@ -346,6 +374,25 @@ class MambaBlock(nn.Module):
     The torch.zeros() isn't a problem (it's same as just feeding the input, because the conv1d is padded)
 
     As we need one such cache variable per layer, we store a caches object, which is simply a list of cache object. (See mamba_lm.py)
+    
+    有關自動迴歸推斷
+
+    使用 Mamba 的酷炫之處是：推斷對序列長度是常數
+    我們只需要為每層 cached 兩個東西：
+    - 隱藏狀態 h（它是（B, ED, N）），就像使用 RNN 做推斷時通常所做的一樣
+    - 該層最後 d_conv-1 個輸入，以便計算時間維度上的 1D 卷積
+    （d_conv 是固定的，所以這不會導致緩存隨著序列生成的增加）
+    （而且 d_conv 通常非常小，例如 4，所以我們只需要「記住」最後 3 個輸入）
+
+    具體來說，這兩個量被放入緩存 tuple 中，並分別命名為 h 和 inputs。
+    h 是（B, ED, N），inputs 是（B, ED, d_conv-1）
+    MambaBlock.step() 接收這個緩存，並且除了輸出輸出外，還輸出下一個呼叫的更新緩存。
+
+    緩存物件初始化如下：（None, torch.zeros()）。
+    當 h 是 None 時，選擇性掃描函數會檢測到它並以 h=0 開始。
+    torch.zeros() 不是問題（它與只輸入相同，因為 conv1d 是填充的）
+
+    由於我們需要每層一個緩存變數，所以我們存儲一個緩存物件列表，稱為 caches。（見 mamba_lm.py）
     """
     
     def step(self, x, cache):
