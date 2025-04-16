@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 from mambapy.pscan import pscan
 
+from c66 import pp, pps
+
 """
 
 This file closely follows the mamba_simple.py from the official Mamba implementation, and the mamba-minimal by @johnma2006.
@@ -250,6 +252,7 @@ class MambaBlock(nn.Module):
 
         # y : (B, L, ED)
 
+        # A 是
         A = -torch.exp(self.A_log.float()) # (ED, N)
         D = self.D.float()
 
@@ -278,6 +281,7 @@ class MambaBlock(nn.Module):
             print("x.shape, delta.shape, B.shape, C.shape, z.shape:", x.shape, delta.shape, B.shape, C.shape, z.shape)
 
             # "softplus" + "bias" + "y * silu(z)" operations are fused
+            # selective_scan_cuda
             y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=True, delta_bias=self.dt_proj.bias.float())
             y = y.transpose(1, 2) # (B, L, ED)
             print("y.shape:", y.shape, "(B,L,ED)")
@@ -286,10 +290,10 @@ class MambaBlock(nn.Module):
             delta = delta.transpose(1, 2)
             delta = F.softplus(delta + self.dt_proj.bias)
 
-            print("x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape:")
-            print(x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape)
+            pp(x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape)
             
             # use parallel scan mode or sequential mode when training
+            # pscan: parallel scan
             if self.config.pscan:
                 print("self.selective_scan")
                 y = self.selective_scan(x, delta, A, B, C, D)
@@ -299,7 +303,10 @@ class MambaBlock(nn.Module):
 
         return y
     
+    # 為生產環境或高性能場景設計的實現，假設 pscan 是一個優化的並行掃描函數。
+    # 可能用於實際部署的模型中，特別是在需要處理大量數據時。
     def selective_scan(self, x, delta, A, B, C, D):
+        # ssm(x) = selective_scan(x, Δ, A, B, C, D)
         # x : (B, L, ED)
         # Δ : (B, L, ED)
         # A : (ED, N)
@@ -307,7 +314,7 @@ class MambaBlock(nn.Module):
         # C : (B, L, N)
         # D : (ED)
 
-        # y : (B, L, ED)
+        # return y : (B, L, ED)
 
         deltaA = torch.exp(delta.unsqueeze(-1) * A) # (B, L, ED, N)
         deltaB = delta.unsqueeze(-1) * B.unsqueeze(2) # (B, L, ED, N)
@@ -322,6 +329,8 @@ class MambaBlock(nn.Module):
 
         return y
     
+    # 參考實現或用於驗證的版本，因為它的邏輯更直接，容易檢查計算是否正確。
+    # 可能用於測試或教育目的，或者在 pscan 不可用的情況下作為備用方案。
     def selective_scan_seq(self, x, delta, A, B, C, D):
         # x : (B, L, ED)
         # Δ : (B, L, ED)

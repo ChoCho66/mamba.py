@@ -148,6 +148,7 @@ class PScan(torch.autograd.Function):
             Xa[:, :, :-1, 1].add_(Aa[:, :, :-1, 1].mul(Xa[:, :, 1:, 0]))
             Aa[:, :, :-1, 1].mul_(Aa[:, :, 1:, 0])
 
+    # hs = pscan(deltaA, BX) # (B, L, ED, N)
     @staticmethod
     def forward(ctx, A_in, X_in):
         """
@@ -178,6 +179,7 @@ class PScan(torch.autograd.Function):
         X = X.transpose(2, 1) # (B, D, npo2(L), N)
 
         # parallel scan (modifies X in-place)
+        # 不會 return 東西
         PScan.pscan(A, X)
 
         ctx.save_for_backward(A_in, X)
