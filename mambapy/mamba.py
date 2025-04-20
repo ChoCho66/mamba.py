@@ -256,6 +256,7 @@ class MambaBlock(nn.Module):
         A = -torch.exp(self.A_log.float()) # (ED, N)
         D = self.D.float()
 
+        # dt_rank = math.ceil(d_model / 16)
         deltaBC = self.x_proj(x) # (B, L, dt_rank+2*N)
         
         print("B, L, ED, N, dt_rank:", \
@@ -319,11 +320,14 @@ class MambaBlock(nn.Module):
         deltaA = torch.exp(delta.unsqueeze(-1) * A) # (B, L, ED, N)
         deltaB = delta.unsqueeze(-1) * B.unsqueeze(2) # (B, L, ED, N)
 
-        BX = deltaB * (x.unsqueeze(-1)) # (B, L, ED, N)
+        BX = deltaB * (x.unsqueeze(-1)) # (B, L, ED, N) * (B, L, ED, 1) = (B, L, ED, N)
         
         hs = pscan(deltaA, BX) # (B, L, ED, N)
 
-        y = (hs @ C.unsqueeze(-1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        y = (hs @ C.unsqueeze(-1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1) -> (B, L, ED)
+        # 最後兩維是 (ED, N) 和 (N, 1)，可以做矩陣乘法
+        # 前面 (B, L) 維度保留
+        # 矩陣乘法 (ED, N) @ (N, 1) → (ED, 1)
 
         y = y + D * x # (B, L, ED)
 
