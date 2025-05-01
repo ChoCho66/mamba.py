@@ -8,7 +8,8 @@ import torch.nn.functional as F
 
 from mambapy.pscan import pscan
 
-from c66 import pp, pps
+from c66 import pp, pps, print, show_print
+show_print = False
 
 """
 
@@ -288,7 +289,9 @@ class MambaBlock(nn.Module):
             print("y.shape:", y.shape, "(B,L,ED)")
         
         else:
-            delta = delta.transpose(1, 2)
+            delta = delta.transpose(1, 2) # (B, L, ED)
+            # softplus: https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
+            # softplus(x) = 1/β * log ( 1 + exp( β * x ) )
             delta = F.softplus(delta + self.dt_proj.bias)
 
             pp(x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape)
