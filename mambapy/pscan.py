@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+from c66 import pps, pp
 
 """
 
@@ -37,46 +38,59 @@ class PScan(torch.autograd.Function):
     def pscan(A, X):
         # A : (B, D, L, N)
         # X : (B, D, L, N)
+        # only supports L that is a power of two (mainly for a clearer code)
+        # 使用前要先把 A,X 填充成 L 是 2^power 次方的長度
 
         # modifies X in place by doing a parallel scan.
         # more formally, X will be populated by these values :
         # H[t] = A[t] * H[t-1] + X[t] with H[0] = 0
         # which are computed in parallel (2*log2(T) sequential steps (ideally), instead of T sequential steps)
-
-        # only supports L that is a power of two (mainly for a clearer code)
         
-        B, D, L, _ = A.size()
+        B, D, L, N = A.size()
+        pp(B,D,L,N)
         num_steps = int(math.log2(L))
 
         # up sweep (last 2 steps unfolded)
-        Aa = A
-        Xa = X
+        Aa = A # (B, D, L, N)
+        Xa = X # (B, D, L, N)
         for _ in range(num_steps-2):
-            T = Xa.size(2)
-            Aa = Aa.view(B, D, T//2, 2, -1)
-            Xa = Xa.view(B, D, T//2, 2, -1)
+            T = Xa.size(2) # T = L
+            Aa = Aa.view(B, D, T//2, 2, -1) # (B, D, L//2, 2, N)
+            Xa = Xa.view(B, D, T//2, 2, -1) # (B, D, L//2, 2, N)
+            # print("把 Aa, Xa 分成兩塊")
+            # pps(Xa)
             
             Xa[:, :, :, 1].add_(Aa[:, :, :, 1].mul(Xa[:, :, :, 0]))
             Aa[:, :, :, 1].mul_(Aa[:, :, :, 0])
 
-            Aa = Aa[:, :, :, 1]
-            Xa = Xa[:, :, :, 1]
+            Aa = Aa[:, :, :, 1] # (B, D, L//2, N)
+            Xa = Xa[:, :, :, 1] # (B, D, L//2, N)
+            # print("把 Aa[:, :, :, 1], Xa[:, :, :, 1] 當成新的 Aa, Xa")
+            # pps(Xa)
 
         # we have only 4, 2 or 1 nodes left
+        # 這裡已經不需要再切割成 A0, A1, X0, X1
         if Xa.size(2) == 4:
             Xa[:, :, 1].add_(Aa[:, :, 1].mul(Xa[:, :, 0]))
             Aa[:, :, 1].mul_(Aa[:, :, 0])
 
             Xa[:, :, 3].add_(Aa[:, :, 3].mul(Xa[:, :, 2] + Aa[:, :, 2].mul(Xa[:, :, 1])))
+        # 一開始長度就很小了 直接不需要 down sweep
         elif Xa.size(2) == 2:
             Xa[:, :, 1].add_(Aa[:, :, 1].mul(Xa[:, :, 0]))
             return
         else:
             return
+        
+        # print("up sweep finish.")
+        # pps(Xa)
+        # pps(X)
+        # print("down sweep begin")
 
         # down sweep (first 2 steps unfolded)
-        Aa = A[:, :, 2**(num_steps-2)-1:L:2**(num_steps-2)]
-        Xa = X[:, :, 2**(num_steps-2)-1:L:2**(num_steps-2)]
+        # A[:,:, start : end : steps ]
+        Aa = A[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)] # ()
+        Xa = X[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)]
         Xa[:, :, 2].add_(Aa[:, :, 2].mul(Xa[:, :, 1]))
         Aa[:, :, 2].mul_(Aa[:, :, 1])
 
@@ -90,6 +104,9 @@ class PScan(torch.autograd.Function):
 
             Xa[:, :, 1:, 0].add_(Aa[:, :, 1:, 0].mul(Xa[:, :, :-1, 1]))
             Aa[:, :, 1:, 0].mul_(Aa[:, :, :-1, 1])
+        
+        # pps(Xa)
+        # pps(X)
 
     @staticmethod
     def pscan_rev(A, X):
@@ -148,7 +165,6 @@ class PScan(torch.autograd.Function):
             Xa[:, :, :-1, 1].add_(Aa[:, :, :-1, 1].mul(Xa[:, :, 1:, 0]))
             Aa[:, :, :-1, 1].mul_(Aa[:, :, 1:, 0])
 
-    # hs = pscan(deltaA, BX) # (B, L, ED, N)
     @staticmethod
     def forward(ctx, A_in, X_in):
         """
@@ -162,7 +178,11 @@ class PScan(torch.autograd.Function):
         Returns:
             H : (B, L, D, N)
         """
-
+        # (B, L, D, N)
+        # mamba 使用時是 D 取 ED
+        # 實際會使用的是 hs = pscan(deltaA, BX) # (B, L, ED, N)
+        # deltaA, BX 都是 (B, L, ED, N)
+        
         L = X_in.size(1)
 
         # cloning is requiered because of the in-place ops
@@ -180,12 +200,23 @@ class PScan(torch.autograd.Function):
 
         # parallel scan (modifies X in-place)
         # 不會 return 東西
+        # 會去修改 X 的內容
         PScan.pscan(A, X)
+        
+        # print("-------")
+        # pps(X)
+        # pp(X[0,0,:3,:3])
+        # pp(X.abs().mean())
+        # PScan.pscan(A, X)
+        # pps(X)
+        # pp(X[0,0,:3,:3])
+        # pp(X.abs().mean())
+        # print("-------")
 
         ctx.save_for_backward(A_in, X)
         
         # slice [:, :L] (cut if there was padding)
-        return X.transpose(2, 1)[:, :L]
+        return X.transpose(2, 1)[:, :L] # (B, L, D, N)
     
     @staticmethod
     def backward(ctx, grad_output_in):

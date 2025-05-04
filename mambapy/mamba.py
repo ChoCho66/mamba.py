@@ -8,8 +8,9 @@ import torch.nn.functional as F
 
 from mambapy.pscan import pscan
 
-from c66 import pp, pps, print, show_print
-show_print = False
+from c66 import pp, pps
+# print, show_print
+# show_print = False
 
 """
 
@@ -169,6 +170,7 @@ class MambaBlock(nn.Module):
         ).clamp(min=config.dt_init_floor)
         inv_dt = dt + torch.log(-torch.expm1(-dt)) # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         with torch.no_grad():
+            # 手動地把 self.dt_proj 這個線性層（nn.Linear）的 bias 欄位設成 inv_dt 的值。
             self.dt_proj.bias.copy_(inv_dt)
         #self.dt_proj.bias._no_reinit = True # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
         # todo : explain why removed
@@ -226,9 +228,9 @@ class MambaBlock(nn.Module):
 
         # x branch
         x = x.transpose(1, 2) # (B, ED, L)
-        print(x.shape)
+        # print(x.shape)
         x = self.conv1d(x)[:, :, :L] # depthwise convolution over time, with a short filter
-        print(x.shape)
+        # print(x.shape)
         x = x.transpose(1, 2) # (B, L, ED)
 
         x = F.silu(x) # (B, L, ED)
@@ -266,6 +268,8 @@ class MambaBlock(nn.Module):
         # 這裡很重要
         # deltaBC, B, C is depend of the input x
         delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state], dim=-1) # (B, L, dt_rank), (B, L, N), (B, L, N)
+        
+        # 在這沒作用 也就是 identity map
         delta, B, C = self._apply_layernorms(delta, B, C)
         delta = self.dt_proj.weight @ delta.transpose(1, 2) # (ED, dt_rank) @ (B, L, dt_rank) -> (B, ED, L)
         # print("delta.shape, B.shape, C.shape:", delta.shape, B.shape, C.shape)
@@ -292,6 +296,7 @@ class MambaBlock(nn.Module):
             delta = delta.transpose(1, 2) # (B, L, ED)
             # softplus: https://pytorch.org/docs/stable/generated/torch.nn.Softplus.html
             # softplus(x) = 1/β * log ( 1 + exp( β * x ) )
+            # pps(self.dt_proj.bias)
             delta = F.softplus(delta + self.dt_proj.bias)
 
             pp(x.shape, delta.shape, A.shape, B.shape, C.shape, z.shape)
