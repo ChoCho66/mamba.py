@@ -41,14 +41,20 @@ class PScan(torch.autograd.Function):
         # only supports L that is a power of two (mainly for a clearer code)
         # 使用前要先把 A,X 填充成 L 是 2^power 次方的長度
 
+        # 這函數會修改 X 的值
         # modifies X in place by doing a parallel scan.
         # more formally, X will be populated by these values :
         # H[t] = A[t] * H[t-1] + X[t] with H[0] = 0
         # which are computed in parallel (2*log2(T) sequential steps (ideally), instead of T sequential steps)
         
+        print("最初的X")
+        pps(X)
+        pp(X[0,0,:3,:3])
+        pp(X.abs().mean())
+        
         B, D, L, N = A.size()
-        pp(B,D,L,N)
         num_steps = int(math.log2(L))
+        pp(B,D,L,N)
 
         # up sweep (last 2 steps unfolded)
         Aa = A # (B, D, L, N)
@@ -82,21 +88,38 @@ class PScan(torch.autograd.Function):
         else:
             return
         
-        # print("up sweep finish.")
-        # pps(Xa)
-        # pps(X)
-        # print("down sweep begin")
+        print("up sweep finish.")
+        print("中間的X")
+        pps(Xa) # (B, D, 4 ,N)
+        pps(X)  # (B, D, L, N)
+        pp(X[0,0,:3,:3])
+        pp(X.abs().mean())
+        print("down sweep begin")
 
         # down sweep (first 2 steps unfolded)
         # A[:,:, start : end : steps ]
-        Aa = A[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)] # ()
-        Xa = X[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)]
+        # L = 2 ** num_steps
+        Aa = A[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)] # (B, D, 4 ,N)
+        Xa = X[:, :, 2**(num_steps-2)-1 : L : 2**(num_steps-2)] # (B, D, 4 ,N)
+        # pps(Xa)
         Xa[:, :, 2].add_(Aa[:, :, 2].mul(Xa[:, :, 1]))
         Aa[:, :, 2].mul_(Aa[:, :, 1])
 
+        # k 從 num_steps-3, num_steps-4, ... , 1, 0
         for k in range(num_steps-3, -1, -1):
+            
+            # Xa: (B, D, ell, N)
+            # pps(Xa)
+            
+            # steps = 2**k
             Aa = A[:, :, 2**k-1:L:2**k]
             Xa = X[:, :, 2**k-1:L:2**k]
+            # pps(Xa)
+            # pp(max(0, (L - 2**k) // 2**k + 1))
+            
+            # Xa: (B, D, 2ell, N) 
+            # 2ell = max(0, (L - 2**k) // 2**k + 1) = [ L-2^k / 2^k ] + 1 = 2^(num_steps-k)
+            # 所以 2ell: 2^3, 2^4, ... , 2^num_steps 
 
             T = Xa.size(2)
             Aa = Aa.view(B, D, T//2, 2, -1)
@@ -105,8 +128,13 @@ class PScan(torch.autograd.Function):
             Xa[:, :, 1:, 0].add_(Aa[:, :, 1:, 0].mul(Xa[:, :, :-1, 1]))
             Aa[:, :, 1:, 0].mul_(Aa[:, :, :-1, 1])
         
-        # pps(Xa)
-        # pps(X)
+        pps(Xa)
+        print("結束的X")
+        pps(X)
+        pp(X[0,0,:3,:3])
+        pp(X.abs().mean())
+        # Xa: (B, D, L/2, 2, N)
+        # X: (B, D, L, N)
 
     @staticmethod
     def pscan_rev(A, X):
