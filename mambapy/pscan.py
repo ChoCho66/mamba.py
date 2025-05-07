@@ -40,6 +40,9 @@ class PScan(torch.autograd.Function):
         # X : (B, D, L, N)
         # only supports L that is a power of two (mainly for a clearer code)
         # 使用前要先把 A,X 填充成 L 是 2^power 次方的長度
+        # 使用方式是 hs = pscan(deltaA, BX)
+        # deltaA, BX : (B, ED, L, N)
+        # 這裡的 ED 對應 D
 
         # 這函數會修改 X 的值
         # modifies X in place by doing a parallel scan.
@@ -68,6 +71,7 @@ class PScan(torch.autograd.Function):
             
             Xa[:, :, :, 1].add_(Aa[:, :, :, 1].mul(Xa[:, :, :, 0]))
             Aa[:, :, :, 1].mul_(Aa[:, :, :, 0])
+            # 將 Xa[:, :, :, 1] 更新為 (Xa[:, :, :, 1] + Aa[:, :, :, 1]) * Xa[:, :, :, 0]，從而修改了 X 中對應位置的值。
 
             Aa = Aa[:, :, :, 1] # (B, D, L//2, N)
             Xa = Xa[:, :, :, 1] # (B, D, L//2, N)
@@ -229,13 +233,11 @@ class PScan(torch.autograd.Function):
         # parallel scan (modifies X in-place)
         # 不會 return 東西
         # 會去修改 X 的內容
-        PScan.pscan(A, X)
-        
         # print("-------")
         # pps(X)
         # pp(X[0,0,:3,:3])
         # pp(X.abs().mean())
-        # PScan.pscan(A, X)
+        PScan.pscan(A, X)
         # pps(X)
         # pp(X[0,0,:3,:3])
         # pp(X.abs().mean())
@@ -263,7 +265,7 @@ class PScan(torch.autograd.Function):
 
         L = grad_output_in.size(1)
 
-        # cloning is requiered because of the in-place ops
+        # cloning is required because of the in-place ops
         if L == npo2(L):
             grad_output = grad_output_in.clone()
             # the next padding will clone A_in

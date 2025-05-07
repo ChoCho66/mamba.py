@@ -16,18 +16,19 @@ from c66 import pp, pps
 
 This file closely follows the mamba_simple.py from the official Mamba implementation, and the mamba-minimal by @johnma2006.
 The major differences are :
--the convolution is done with torch.nn.Conv1d
--the selective scan is done in PyTorch
+- the convolution is done with torch.nn.Conv1d
+- the selective scan is done in PyTorch
 
 A sequential version of the selective scan is also available for comparison. Also, it is possible to use the official Mamba implementation.
 
 This is the structure of the torch modules :
 - A Mamba model is composed of several layers, which are ResidualBlock.
 - A ResidualBlock is composed of a MambaBlock, a normalization, and a residual connection : ResidualBlock(x) = mamba(norm(x)) + x
-- This leaves us with the MambaBlock : its input x is (B, L, D) and its outputs y is also (B, L, D) (B=batch size, L=seq len, D=model dim).
-First, we expand x into (B, L, 2*ED) (where E is usually 2) and split it into x and z, each (B, L, ED).
-Then, we apply the short 1d conv to x, followed by an activation function (silu), then the SSM.
-We then multiply it by silu(z).
+- This leaves us with the MambaBlock : 
+  - its input x is (B, L, D) and its outputs y is also (B, L, D) (B=batch size, L=seq len, D=model dim).
+  - First, we expand x into (B, L, 2*ED) (where E is usually 2) and split it into x and z, each (B, L, ED).
+  - Then, we apply the short 1d conv to x, followed by an activation function (silu), then the SSM.
+  - We then multiply it by silu(z).
 See Figure 3 of the paper (page 8) for a visual representation of a MambaBlock.
 
 """
@@ -36,7 +37,7 @@ See Figure 3 of the paper (page 8) for a visual representation of a MambaBlock.
 class MambaConfig:
     d_model: int # D
     n_layers: int
-    dt_rank: Union[int, str] = 'auto'
+    dt_rank: Union[int, str] = 'auto' # 預設 D//16
     d_state: int = 16 # N in paper/comments
     expand_factor: int = 2 # E in paper/comments
     d_conv: int = 4
@@ -64,7 +65,7 @@ class MambaConfig:
         self.d_inner = self.expand_factor * self.d_model # E*D = ED in comments
 
         if self.dt_rank == 'auto':
-            self.dt_rank = math.ceil(self.d_model / 16)
+            self.dt_rank = math.ceil(self.d_model / 16) # D//16
 
         # muP
         if self.mup:
@@ -141,6 +142,7 @@ class MambaBlock(nn.Module):
         self.config = config
 
         # projects block input from D to 2*ED (two branches)
+        # nn.Linear(D,2ED)
         self.in_proj = nn.Linear(config.d_model, 2 * config.d_inner, bias=config.bias)
 
         self.conv1d = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner, 
@@ -149,9 +151,11 @@ class MambaBlock(nn.Module):
                               padding=config.d_conv - 1)
         
         # projects x to input-dependent delta, B, C
+        # nn.Linear(ED, dt_rank+2N)
         self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False)
 
         # projects delta from dt_rank to d_inner
+        # nn.Linear(dt_rank, ED)
         self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True)
 
         # dt initialization
@@ -176,7 +180,11 @@ class MambaBlock(nn.Module):
         # todo : explain why removed
 
         # S4D real initialization
-        A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+        # d_state = N, d_inner = ED
+        # 1,2, ..., N
+        A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1) # (ED, N)
+        # A 的 shape 為 (ED, N) 是因為
+        # 對於每個 ED, 程式碼的 A 是 A 矩陣 NxN 的 對角線的值
         self.A_log = nn.Parameter(torch.log(A)) # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
         self.A_log._no_weight_decay = True
 
@@ -184,6 +192,7 @@ class MambaBlock(nn.Module):
         self.D._no_weight_decay = True
 
         # projects block output from ED back to D
+        # nn.Linear(ED,D)
         self.out_proj = nn.Linear(config.d_inner, config.d_model, bias=config.bias)
 
         # used in jamba
