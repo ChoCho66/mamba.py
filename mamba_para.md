@@ -8,9 +8,9 @@
 - self.in_proj: nn.Linear(D, 2ED)
   - D * 2 * ED
 - self.x_proj: nn.Linear(ED, dt_rank+2D)
-  - 2ED * (dt_rank+2N)
+  - ED * (dt_rank+2N)
 - self.dt_proj: nn.Linear(dt_rank, ED)
-  - dt_rank * ED
+  - dt_rank * ED + ED
 - self.A_log = nn.Parameter(torch.log(A)) (ED, N)
   - ED * N
 - self.D = nn.Parameter(torch.ones(config.d_inner)) (ED, )
